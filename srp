@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -15,10 +16,12 @@ local Window = NightUI:CreateWindow({
 })
 
 local Visuals = Window:CreateTab("Visuals")
+local Movement = Window:CreateTab("Movement")
 
 local highlightSurvivorsEnabled = false
 local highlightBeastEnabled = false
 local highlightComputersEnabled = false
+local infiniteWallHopEnabled = false
 
 local highlightFolder = PlayerGui:FindFirstChild("DebugHighlights")
 if not highlightFolder then
@@ -442,6 +445,60 @@ local function disableComputerHighlights()
 	clearComputerHighlights()
 end
 
+--// INFINITE WALL HOP LOGIC
+--// This only infinite jumps. No turning.
+
+local wallHopConnection = nil
+local lastWallHopJump = 0
+local wallHopJumpCooldown = 0.08
+
+local function doInfiniteWallHopJump()
+	if not infiniteWallHopEnabled then
+		return
+	end
+
+	local now = os.clock()
+	if now - lastWallHopJump < wallHopJumpCooldown then
+		return
+	end
+
+	lastWallHopJump = now
+
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+end
+
+local function enableInfiniteWallHop()
+	infiniteWallHopEnabled = true
+
+	if wallHopConnection then
+		wallHopConnection:Disconnect()
+		wallHopConnection = nil
+	end
+
+	wallHopConnection = UserInputService.JumpRequest:Connect(function()
+		doInfiniteWallHopJump()
+	end)
+end
+
+local function disableInfiniteWallHop()
+	infiniteWallHopEnabled = false
+
+	if wallHopConnection then
+		wallHopConnection:Disconnect()
+		wallHopConnection = nil
+	end
+end
+
 --// UI TOGGLES
 
 Visuals:CreateToggle({
@@ -484,6 +541,18 @@ Visuals:CreateToggle({
 	end
 })
 
+Movement:CreateToggle({
+	Name = "Infinite Wall Hop",
+	Default = false,
+	Callback = function(enabled)
+		if enabled then
+			enableInfiniteWallHop()
+		else
+			disableInfiniteWallHop()
+		end
+	end
+})
+
 --// PLAYER WATCHERS
 
 for _, player in ipairs(Players:GetPlayers()) do
@@ -505,6 +574,10 @@ Players.PlayerRemoving:Connect(function(player)
 
 		characterConnections[player] = nil
 	end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+	lastWallHopJump = 0
 end)
 
 --// REFRESH LOOP FOR PLAYER HIGHLIGHTS
