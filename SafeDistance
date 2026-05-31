@@ -24,14 +24,20 @@ function Module.new(Context)
 	local lastPathRefresh = 0
 	local lastKnownPosition = nil
 	local stuckTimer = 0
+	local lastTargetPosition = nil
 
 	local SAFE_DISTANCE = 120
 	local DANGER_DISTANCE = 65
+
 	local PATH_REFRESH = 1.15
 	local TRIGGER_REFRESH = 0.35
+
 	local STUCK_DISTANCE = 1.5
 	local STUCK_TIME = 1.25
-	local COMPUTER_STOP_OFFSET = Vector3.new(0, 0, -3)
+
+	local CLEARWALL_GAP = 0.1
+	local WORK_DISTANCE = 7
+	local STOP_DISTANCE = 4
 
 	local function getCharacterData(player)
 		local character = player.Character
@@ -189,19 +195,125 @@ function Module.new(Context)
 		return model:IsA("Model") and model.Name == "ComputerTable"
 	end
 
+	local function getComputerTrigger(computer)
+		return computer:FindFirstChild("ComputerTrigger2", true)
+	end
+
 	local function getComputerTriggerEvent(computer)
-		local trigger = computer:FindFirstChild("ComputerTrigger2", true)
+		local trigger = getComputerTrigger(computer)
 		return trigger and trigger:FindFirstChild("Event")
 	end
 
+	local function getClearWall(computer)
+		return computer:FindFirstChild("ClearWall", true)
+	end
+
+	local function getComputerPart(computer)
+		return computer.PrimaryPart or computer:FindFirstChildWhichIsA("BasePart", true)
+	end
+
+	local function getPartPosition(instance)
+		if not instance then
+			return nil
+		end
+
+		if instance:IsA("BasePart") then
+			return instance.Position
+		end
+
+		if instance:IsA("Attachment") then
+			return instance.WorldPosition
+		end
+
+		if instance:IsA("Model") then
+			local part = instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart", true)
+			return part and part.Position
+		end
+
+		return nil
+	end
+
 	local function getComputerPosition(computer)
-		local part = computer.PrimaryPart or computer:FindFirstChildWhichIsA("BasePart", true)
+		local trigger = getComputerTrigger(computer)
+		local triggerPosition = getPartPosition(trigger)
+
+		if triggerPosition then
+			return triggerPosition
+		end
+
+		local part = getComputerPart(computer)
 		return part and part.Position
 	end
 
+	local function getHorizontalBoxRadius(part, direction)
+		local localDirection = part.CFrame:VectorToObjectSpace(direction)
+		local halfSize = part.Size * 0.5
+
+		return (math.abs(localDirection.X) * halfSize.X) + (math.abs(localDirection.Z) * halfSize.Z)
+	end
+
+	local function getGroundPosition(position)
+		local character = LocalPlayer.Character
+
+		local rayParams = RaycastParams.new()
+		rayParams.FilterType = Enum.RaycastFilterType.Exclude
+		rayParams.FilterDescendantsInstances = character and { character } or {}
+
+		local result = Workspace:Raycast(position + Vector3.new(0, 8, 0), Vector3.new(0, -40, 0), rayParams)
+
+		if result then
+			return result.Position + Vector3.new(0, 0.15, 0)
+		end
+
+		return position
+	end
+
 	local function getTargetPosition(computer)
-		local pos = getComputerPosition(computer)
-		return pos and (pos + COMPUTER_STOP_OFFSET)
+		local computerPosition = getComputerPosition(computer)
+		if not computerPosition then
+			return nil
+		end
+
+		local clearWall = getClearWall(computer)
+		local radius = getLocalCharacterSize()
+
+		if clearWall and clearWall:IsA("BasePart") then
+			local _, _, root = getCharacterData(LocalPlayer)
+
+			local direction
+
+			if root then
+				direction = Vector3.new(root.Position.X - clearWall.Position.X, 0, root.Position.Z - clearWall.Position.Z)
+			end
+
+			if not direction or direction.Magnitude < 0.05 then
+				direction = Vector3.new(computerPosition.X - clearWall.Position.X, 0, computerPosition.Z - clearWall.Position.Z)
+			end
+
+			if direction.Magnitude < 0.05 then
+				direction = clearWall.CFrame.LookVector
+				direction = Vector3.new(direction.X, 0, direction.Z)
+			end
+
+			if direction.Magnitude < 0.05 then
+				direction = Vector3.new(0, 0, -1)
+			end
+
+			direction = direction.Unit
+
+			local wallRadius = getHorizontalBoxRadius(clearWall, direction)
+			local standDistance = wallRadius + radius + CLEARWALL_GAP
+
+			local target = clearWall.Position + (direction * standDistance)
+			target = Vector3.new(target.X, computerPosition.Y, target.Z)
+
+			return getGroundPosition(target)
+		end
+
+		local fallbackDirection = Vector3.new(0, 0, -1)
+		local target = computerPosition + (fallbackDirection * (radius + CLEARWALL_GAP))
+
+		return getGroundPosition(target)
 	end
 
 	local function getNearestGoodComputer()
@@ -217,7 +329,7 @@ function Module.new(Context)
 
 		for _, obj in ipairs(Workspace:GetDescendants()) do
 			if isComputerTable(obj) then
-				local pos = getComputerPosition(obj)
+				local pos = getTargetPosition(obj)
 				local event = getComputerTriggerEvent(obj)
 
 				if pos and event then
@@ -290,6 +402,16 @@ function Module.new(Context)
 		return stuckTimer >= STUCK_TIME
 	end
 
+	local function stopCharacterStill()
+		local _, humanoid, root = getCharacterData(LocalPlayer)
+
+		if humanoid and root then
+			humanoid:MoveTo(root.Position)
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+
 	local function followPathTo(position)
 		cancelPath()
 
@@ -320,6 +442,10 @@ function Module.new(Context)
 					break
 				end
 
+				if (root.Position - position).Magnitude <= STOP_DISTANCE then
+					break
+				end
+
 				if waypoint.Action == Enum.PathWaypointAction.Jump then
 					humanoid.Jump = true
 				end
@@ -333,11 +459,15 @@ function Module.new(Context)
 				end
 			end
 
+			if enabled and root and (root.Position - position).Magnitude <= WORK_DISTANCE then
+				stopCharacterStill()
+			end
+
 			blockedConnection:Disconnect()
 		end)
 	end
 
-	local function shouldRefreshPath(computer, deltaTime)
+	local function shouldRefreshPath(computer, targetPosition, deltaTime)
 		local _, _, root = getCharacterData(LocalPlayer)
 
 		if not root then
@@ -346,6 +476,14 @@ function Module.new(Context)
 
 		if computer ~= lastTargetComputer then
 			return true
+		end
+
+		if not lastTargetPosition or (lastTargetPosition - targetPosition).Magnitude > 2 then
+			return true
+		end
+
+		if (root.Position - targetPosition).Magnitude <= STOP_DISTANCE then
+			return false
 		end
 
 		if isStuck(root, deltaTime) then
@@ -368,20 +506,36 @@ function Module.new(Context)
 
 		local targetPosition = getTargetPosition(computer)
 
-		if targetPosition and shouldRefreshPath(computer, deltaTime) then
+		if targetPosition and shouldRefreshPath(computer, targetPosition, deltaTime) then
 			lastTargetComputer = computer
+			lastTargetPosition = targetPosition
 			lastPathRefresh = os.clock()
 			stuckTimer = 0
 			followPathTo(targetPosition)
 		end
 
-		if os.clock() - lastTrigger >= TRIGGER_REFRESH then
-			lastTrigger = os.clock()
+		local _, _, root = getCharacterData(LocalPlayer)
 
-			local event = getComputerTriggerEvent(computer)
-			if event then
-				fireTrigger(event, true)
+		if not root or not targetPosition then
+			stopTrigger()
+			return
+		end
+
+		local closeEnoughToWork = (root.Position - targetPosition).Magnitude <= WORK_DISTANCE
+
+		if closeEnoughToWork then
+			stopCharacterStill()
+
+			if os.clock() - lastTrigger >= TRIGGER_REFRESH then
+				lastTrigger = os.clock()
+
+				local event = getComputerTriggerEvent(computer)
+				if event then
+					fireTrigger(event, true)
+				end
 			end
+		else
+			stopTrigger()
 		end
 	end
 
@@ -392,6 +546,7 @@ function Module.new(Context)
 
 		enabled = true
 		lastTargetComputer = nil
+		lastTargetPosition = nil
 		lastKnownPosition = nil
 		stuckTimer = 0
 		lastPathRefresh = 0
@@ -408,6 +563,7 @@ function Module.new(Context)
 		enabled = false
 		stopTrigger()
 		cancelPath()
+		stopCharacterStill()
 
 		if loopConnection then
 			loopConnection:Disconnect()
@@ -420,6 +576,7 @@ function Module.new(Context)
 		end
 
 		lastTargetComputer = nil
+		lastTargetPosition = nil
 		lastKnownPosition = nil
 		stuckTimer = 0
 	end
@@ -442,6 +599,7 @@ function Module.new(Context)
 			stopTrigger()
 			cancelPath()
 			lastTargetComputer = nil
+			lastTargetPosition = nil
 		end
 	end)
 
