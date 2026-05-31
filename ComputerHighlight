@@ -1,0 +1,307 @@
+--// modules/ComputerHighlights.lua
+local ComputerHighlights = {}
+ComputerHighlights.__index = ComputerHighlights
+
+local Workspace
+local RunService
+local highlightFolder
+local highlightComputersEnabled = false
+
+--// COMPUTER HIGHLIGHT LOGIC
+
+local computerHighlights = {}
+local computerColorConnections = {}
+local computerRefreshConnection = nil
+local computerDescendantAddedConnection = nil
+local computerDescendantRemovingConnection = nil
+
+local DEFAULT_COMPUTER_COLOR = Color3.fromRGB(0, 200, 255)
+
+local function isComputerTable(model)
+	return model ~= nil and model.Name == "ComputerTable" and model:IsA("Model")
+end
+
+local function findDeep(parent, name)
+	if not parent then
+		return nil
+	end
+
+	return parent:FindFirstChild(name, true)
+end
+
+local function getScreenPart(computerTable)
+	if not computerTable then
+		return nil
+	end
+
+	local screen = findDeep(computerTable, "Screen")
+
+	if not screen then
+		return nil
+	end
+
+	if screen:IsA("BasePart") then
+		return screen
+	end
+
+	if screen:IsA("Model") or screen:IsA("Folder") then
+		for _, descendant in ipairs(screen:GetDescendants()) do
+			if descendant:IsA("BasePart") then
+				return descendant
+			end
+		end
+	end
+
+	return nil
+end
+
+local function getComputerColor(computerTable)
+	local screenPart = getScreenPart(computerTable)
+
+	if screenPart then
+		return screenPart.Color
+	end
+
+	return DEFAULT_COMPUTER_COLOR
+end
+
+local function disconnectComputerColorConnections(computerTable)
+	if computerColorConnections[computerTable] then
+		for _, connection in ipairs(computerColorConnections[computerTable]) do
+			if connection then
+				connection:Disconnect()
+			end
+		end
+
+		computerColorConnections[computerTable] = nil
+	end
+end
+
+local function removeComputerHighlight(computerTable)
+	local highlight = computerHighlights[computerTable]
+
+	if highlight and highlight.Parent then
+		highlight:Destroy()
+	end
+
+	computerHighlights[computerTable] = nil
+	disconnectComputerColorConnections(computerTable)
+end
+
+local function clearComputerHighlights()
+	for computerTable, highlight in pairs(computerHighlights) do
+		if highlight and highlight.Parent then
+			highlight:Destroy()
+		end
+	end
+
+	for computerTable, connections in pairs(computerColorConnections) do
+		for _, connection in ipairs(connections) do
+			if connection then
+				connection:Disconnect()
+			end
+		end
+	end
+
+	computerHighlights = {}
+	computerColorConnections = {}
+
+	if computerRefreshConnection then
+		computerRefreshConnection:Disconnect()
+		computerRefreshConnection = nil
+	end
+
+	if computerDescendantAddedConnection then
+		computerDescendantAddedConnection:Disconnect()
+		computerDescendantAddedConnection = nil
+	end
+
+	if computerDescendantRemovingConnection then
+		computerDescendantRemovingConnection:Disconnect()
+		computerDescendantRemovingConnection = nil
+	end
+end
+
+local function hookScreenColor(computerTable, highlight)
+	disconnectComputerColorConnections(computerTable)
+
+	computerColorConnections[computerTable] = {}
+
+	local screenPart = getScreenPart(computerTable)
+
+	if not screenPart then
+		return
+	end
+
+	local colorConnection = screenPart:GetPropertyChangedSignal("Color"):Connect(function()
+		if highlight and highlight.Parent then
+			highlight.OutlineColor = screenPart.Color
+		end
+	end)
+
+	local brickColorConnection = screenPart:GetPropertyChangedSignal("BrickColor"):Connect(function()
+		if highlight and highlight.Parent then
+			highlight.OutlineColor = screenPart.BrickColor.Color
+		end
+	end)
+
+	table.insert(computerColorConnections[computerTable], colorConnection)
+	table.insert(computerColorConnections[computerTable], brickColorConnection)
+end
+
+local function createOrUpdateComputerHighlight(computerTable)
+	if not highlightComputersEnabled then
+		return
+	end
+
+	if not isComputerTable(computerTable) then
+		removeComputerHighlight(computerTable)
+		return
+	end
+
+	local color = getComputerColor(computerTable)
+	local existing = computerHighlights[computerTable]
+
+	if existing and existing.Parent then
+		existing.Adornee = computerTable
+		existing.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		existing.FillTransparency = 1
+		existing.OutlineTransparency = 0
+		existing.OutlineColor = color
+
+		if not computerColorConnections[computerTable] then
+			hookScreenColor(computerTable, existing)
+		end
+
+		return
+	end
+
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "ComputerHighlight"
+	highlight.Adornee = computerTable
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.FillTransparency = 1
+	highlight.OutlineTransparency = 0
+	highlight.OutlineColor = color
+	highlight.Parent = highlightFolder
+
+	computerHighlights[computerTable] = highlight
+	hookScreenColor(computerTable, highlight)
+end
+
+local function updateComputerHighlights()
+	if not highlightComputersEnabled then
+		return
+	end
+
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		if isComputerTable(obj) then
+			createOrUpdateComputerHighlight(obj)
+		end
+	end
+
+	for computerTable, highlight in pairs(computerHighlights) do
+		if not computerTable or not computerTable.Parent or not isComputerTable(computerTable) then
+			removeComputerHighlight(computerTable)
+		else
+			local color = getComputerColor(computerTable)
+
+			if highlight and highlight.Parent then
+				highlight.Adornee = computerTable
+				highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+				highlight.FillTransparency = 1
+				highlight.OutlineTransparency = 0
+				highlight.OutlineColor = color
+			else
+				removeComputerHighlight(computerTable)
+			end
+		end
+	end
+end
+
+local function enableComputerHighlights()
+	clearComputerHighlights()
+
+	highlightComputersEnabled = true
+	updateComputerHighlights()
+
+	local lastFullRefresh = 0
+
+	computerRefreshConnection = RunService.Heartbeat:Connect(function()
+		if not highlightComputersEnabled then
+			return
+		end
+
+		local now = os.clock()
+
+		if now - lastFullRefresh >= 0.5 then
+			lastFullRefresh = now
+			updateComputerHighlights()
+		end
+	end)
+
+	computerDescendantAddedConnection = Workspace.DescendantAdded:Connect(function(descendant)
+		if not highlightComputersEnabled then
+			return
+		end
+
+		if descendant.Name == "ComputerTable" or descendant.Name == "Screen" then
+			task.delay(0.2, function()
+				if highlightComputersEnabled then
+					updateComputerHighlights()
+				end
+			end)
+		end
+	end)
+
+	computerDescendantRemovingConnection = Workspace.DescendantRemoving:Connect(function(descendant)
+		if not highlightComputersEnabled then
+			return
+		end
+
+		if descendant.Name == "ComputerTable" then
+			removeComputerHighlight(descendant)
+			return
+		end
+
+		if descendant.Name == "Screen" then
+			task.defer(function()
+				if highlightComputersEnabled then
+					updateComputerHighlights()
+				end
+			end)
+		end
+	end)
+end
+
+local function disableComputerHighlights()
+	highlightComputersEnabled = false
+	clearComputerHighlights()
+end
+
+function ComputerHighlights.new(ctx)
+	local self = setmetatable({}, ComputerHighlights)
+	Workspace = ctx.Workspace
+	RunService = ctx.RunService
+	highlightFolder = ctx.HighlightFolder
+	highlightComputersEnabled = false
+	return self
+end
+
+function ComputerHighlights:SetEnabled(enabled)
+	if enabled then
+		enableComputerHighlights()
+	else
+		disableComputerHighlights()
+	end
+end
+
+function ComputerHighlights:Enable()
+	enableComputerHighlights()
+end
+
+function ComputerHighlights:Disable()
+	disableComputerHighlights()
+end
+
+return ComputerHighlights
