@@ -34,7 +34,6 @@ local PlayerHighlights = loadModule("playerhightlights")
 local ComputerHighlight = loadModule("ComputerHighlight")
 local InfiniteWallHop = loadModule("Infinitewallhop")
 local GhostMode = loadModule("ghost")
-local SafeDistance = loadModule("SafeDistance")
 
 local NightUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/asutse0/NightUILibrary/refs/heads/main/Project"))()
 
@@ -52,7 +51,6 @@ local playerHighlights = PlayerHighlights.new(Context)
 local computerHighlights = ComputerHighlight.new(Context)
 local infiniteWallHop = InfiniteWallHop.new(Context)
 local ghostMode = GhostMode.new(Context)
-local safeDistance = SafeDistance.new(Context)
 
 Visuals:CreateToggle({
 	Name = "Highlight Survivors",
@@ -94,20 +92,11 @@ Movement:CreateToggle({
 	end
 })
 
-Movement:CreateToggle({
-	Name = "Safe Distance Auto Computer",
-	Default = false,
-	Callback = function(enabled)
-		safeDistance:SetEnabled(enabled)
-	end
-})
-
 playerHighlights:Start()
 
 LocalPlayer.CharacterAdded:Connect(function()
 	infiniteWallHop:ResetCooldown()
 	ghostMode:Disable()
-	safeDistance:Disable()
 end)
 
 RunService.RenderStepped:Connect(function()
