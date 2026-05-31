@@ -1,0 +1,209 @@
+--// modules/PlayerHighlights.lua
+local PlayerHighlights = {}
+PlayerHighlights.__index = PlayerHighlights
+
+local Players
+local LocalPlayer
+local highlightFolder
+local characterConnections
+local highlightSurvivorsEnabled
+local highlightBeastEnabled
+
+--// PLAYER HIGHLIGHT LOGIC
+
+local function hasHammer(character)
+	if not character then
+		return false
+	end
+
+	local hammer = character:FindFirstChild("Hammer")
+	return hammer ~= nil and hammer:IsA("Model")
+end
+
+local function getPlayerHighlightName(player, highlightType)
+	return player.Name .. "_" .. highlightType .. "_Highlight"
+end
+
+local function removePlayerHighlight(player, highlightType)
+	local existing = highlightFolder:FindFirstChild(getPlayerHighlightName(player, highlightType))
+
+	if existing then
+		existing:Destroy()
+	end
+end
+
+local function createOrUpdatePlayerHighlight(player, character, highlightType, outlineColor)
+	local highlightName = getPlayerHighlightName(player, highlightType)
+	local existing = highlightFolder:FindFirstChild(highlightName)
+
+	if existing then
+		existing.Adornee = character
+		existing.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		existing.FillTransparency = 1
+		existing.OutlineTransparency = 0
+		existing.OutlineColor = outlineColor
+		return
+	end
+
+	local highlight = Instance.new("Highlight")
+	highlight.Name = highlightName
+	highlight.Adornee = character
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.FillTransparency = 1
+	highlight.OutlineTransparency = 0
+	highlight.OutlineColor = outlineColor
+	highlight.Parent = highlightFolder
+end
+
+local function updatePlayerHighlights()
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer then
+			local character = player.Character
+
+			if character then
+				local beast = hasHammer(character)
+				local survivor = not beast
+
+				if highlightSurvivorsEnabled and survivor then
+					createOrUpdatePlayerHighlight(
+						player,
+						character,
+						"Survivor",
+						Color3.fromRGB(0, 255, 100)
+					)
+				else
+					removePlayerHighlight(player, "Survivor")
+				end
+
+				if highlightBeastEnabled and beast then
+					createOrUpdatePlayerHighlight(
+						player,
+						character,
+						"Beast",
+						Color3.fromRGB(255, 60, 60)
+					)
+				else
+					removePlayerHighlight(player, "Beast")
+				end
+			else
+				removePlayerHighlight(player, "Survivor")
+				removePlayerHighlight(player, "Beast")
+			end
+		end
+	end
+end
+
+local function clearSurvivorHighlights()
+	for _, player in ipairs(Players:GetPlayers()) do
+		removePlayerHighlight(player, "Survivor")
+	end
+end
+
+local function clearBeastHighlights()
+	for _, player in ipairs(Players:GetPlayers()) do
+		removePlayerHighlight(player, "Beast")
+	end
+end
+
+local function watchCharacter(player, character)
+	if characterConnections[player] then
+		for _, connection in ipairs(characterConnections[player]) do
+			connection:Disconnect()
+		end
+	end
+
+	characterConnections[player] = {}
+
+	table.insert(characterConnections[player], character.ChildAdded:Connect(function(child)
+		if child.Name == "Hammer" then
+			updatePlayerHighlights()
+		end
+	end))
+
+	table.insert(characterConnections[player], character.ChildRemoved:Connect(function(child)
+		if child.Name == "Hammer" then
+			updatePlayerHighlights()
+		end
+	end))
+
+	updatePlayerHighlights()
+end
+
+local function watchPlayer(player)
+	if player == LocalPlayer then
+		return
+	end
+
+	if player.Character then
+		watchCharacter(player, player.Character)
+	end
+
+	player.CharacterAdded:Connect(function(character)
+		task.wait(0.25)
+		watchCharacter(player, character)
+	end)
+
+	player.CharacterRemoving:Connect(function()
+		removePlayerHighlight(player, "Survivor")
+		removePlayerHighlight(player, "Beast")
+	end)
+end
+
+function PlayerHighlights.new(ctx)
+	local self = setmetatable({}, PlayerHighlights)
+	Players = ctx.Players
+	LocalPlayer = ctx.LocalPlayer
+	highlightFolder = ctx.HighlightFolder
+	characterConnections = {}
+	highlightSurvivorsEnabled = false
+	highlightBeastEnabled = false
+	return self
+end
+
+function PlayerHighlights:SetSurvivorsEnabled(enabled)
+	highlightSurvivorsEnabled = enabled
+	if enabled then
+		updatePlayerHighlights()
+	else
+		clearSurvivorHighlights()
+	end
+end
+
+function PlayerHighlights:SetBeastEnabled(enabled)
+	highlightBeastEnabled = enabled
+	if enabled then
+		updatePlayerHighlights()
+	else
+		clearBeastHighlights()
+	end
+end
+
+function PlayerHighlights:Start()
+	for _, player in ipairs(Players:GetPlayers()) do
+		watchPlayer(player)
+	end
+
+	Players.PlayerAdded:Connect(function(player)
+		watchPlayer(player)
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		removePlayerHighlight(player, "Survivor")
+		removePlayerHighlight(player, "Beast")
+
+		if characterConnections[player] then
+			for _, connection in ipairs(characterConnections[player]) do
+				connection:Disconnect()
+			end
+			characterConnections[player] = nil
+		end
+	end)
+end
+
+function PlayerHighlights:Step()
+	if highlightSurvivorsEnabled or highlightBeastEnabled then
+		updatePlayerHighlights()
+	end
+end
+
+return PlayerHighlights
