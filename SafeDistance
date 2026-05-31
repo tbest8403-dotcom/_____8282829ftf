@@ -20,21 +20,24 @@ function Module.new(Context)
 	local pathThread = nil
 
 	local lastTargetComputer = nil
+	local lastTargetPosition = nil
 	local lastTrigger = 0
 	local lastPathRefresh = 0
 	local lastKnownPosition = nil
 	local stuckTimer = 0
-	local lastTargetPosition = nil
+
+	local VERSION = "v1.1"
 
 	local SAFE_DISTANCE = 120
 	local DANGER_DISTANCE = 65
 
-	local PATH_REFRESH = 1.15
+	local PATH_REFRESH = 0.75
 	local TRIGGER_REFRESH = 0.35
 
-	local STUCK_DISTANCE = 1.5
-	local STUCK_TIME = 1.25
+	local STUCK_DISTANCE = 1.25
+	local STUCK_TIME = 0.75
 
+	local WAYPOINT_TIMEOUT = 1.6
 	local CLEARWALL_GAP = 0.1
 	local WORK_DISTANCE = 7
 	local STOP_DISTANCE = 4
@@ -77,7 +80,7 @@ function Module.new(Context)
 			AgentHeight = height,
 			AgentCanJump = true,
 			AgentCanClimb = true,
-			WaypointSpacing = math.clamp(radius * 2, 3, 7)
+			WaypointSpacing = math.clamp(radius * 1.5, 2.5, 6)
 		})
 	end
 
@@ -135,8 +138,8 @@ function Module.new(Context)
 
 		local frame = Instance.new("Frame")
 		frame.Name = "Frame"
-		frame.Size = UDim2.fromOffset(240, 62)
-		frame.Position = UDim2.new(1, -255, 0, 18)
+		frame.Size = UDim2.fromOffset(252, 66)
+		frame.Position = UDim2.new(1, -267, 0, 18)
 		frame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
 		frame.BackgroundTransparency = 0.08
 		frame.BorderSizePixel = 0
@@ -151,7 +154,7 @@ function Module.new(Context)
 		title.Size = UDim2.new(1, -16, 0, 22)
 		title.Position = UDim2.fromOffset(8, 5)
 		title.BackgroundTransparency = 1
-		title.Text = "Beast Distance"
+		title.Text = "SafeDistance " .. VERSION
 		title.TextColor3 = Color3.fromRGB(255, 255, 255)
 		title.TextSize = 14
 		title.Font = Enum.Font.GothamBold
@@ -160,7 +163,7 @@ function Module.new(Context)
 
 		local status = Instance.new("TextLabel")
 		status.Name = "Status"
-		status.Size = UDim2.new(1, -16, 0, 26)
+		status.Size = UDim2.new(1, -16, 0, 22)
 		status.Position = UDim2.fromOffset(8, 29)
 		status.BackgroundTransparency = 1
 		status.Text = "Checking..."
@@ -169,6 +172,25 @@ function Module.new(Context)
 		status.Font = Enum.Font.GothamSemibold
 		status.TextXAlignment = Enum.TextXAlignment.Left
 		status.Parent = frame
+
+		local action = Instance.new("TextLabel")
+		action.Name = "Action"
+		action.Size = UDim2.new(1, -16, 0, 14)
+		action.Position = UDim2.fromOffset(8, 50)
+		action.BackgroundTransparency = 1
+		action.Text = "Pathing..."
+		action.TextColor3 = Color3.fromRGB(185, 185, 205)
+		action.TextSize = 11
+		action.Font = Enum.Font.Gotham
+		action.TextXAlignment = Enum.TextXAlignment.Left
+		action.Parent = frame
+	end
+
+	local function setActionText(text)
+		local action = gui and gui:FindFirstChild("Frame") and gui.Frame:FindFirstChild("Action")
+		if action then
+			action.Text = text
+		end
 	end
 
 	local function updateGui()
@@ -259,7 +281,7 @@ function Module.new(Context)
 		rayParams.FilterType = Enum.RaycastFilterType.Exclude
 		rayParams.FilterDescendantsInstances = character and { character } or {}
 
-		local result = Workspace:Raycast(position + Vector3.new(0, 8, 0), Vector3.new(0, -40, 0), rayParams)
+		local result = Workspace:Raycast(position + Vector3.new(0, 12, 0), Vector3.new(0, -60, 0), rayParams)
 
 		if result then
 			return result.Position + Vector3.new(0, 0.15, 0)
@@ -279,7 +301,6 @@ function Module.new(Context)
 
 		if clearWall and clearWall:IsA("BasePart") then
 			local _, _, root = getCharacterData(LocalPlayer)
-
 			local direction
 
 			if root then
@@ -402,6 +423,19 @@ function Module.new(Context)
 		return stuckTimer >= STUCK_TIME
 	end
 
+	local function forceJump()
+		local _, humanoid, root = getCharacterData(LocalPlayer)
+
+		if humanoid then
+			humanoid.Jump = true
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+
+		if root then
+			root.AssemblyLinearVelocity = Vector3.new(root.AssemblyLinearVelocity.X, math.max(root.AssemblyLinearVelocity.Y, 38), root.AssemblyLinearVelocity.Z)
+		end
+	end
+
 	local function stopCharacterStill()
 		local _, humanoid, root = getCharacterData(LocalPlayer)
 
@@ -410,6 +444,44 @@ function Module.new(Context)
 			root.AssemblyLinearVelocity = Vector3.zero
 			root.AssemblyAngularVelocity = Vector3.zero
 		end
+	end
+
+	local function moveToWaypoint(humanoid, root, waypoint, finalPosition)
+		if waypoint.Action == Enum.PathWaypointAction.Jump then
+			forceJump()
+		end
+
+		humanoid:MoveTo(waypoint.Position)
+
+		local startTime = os.clock()
+		local startPosition = root.Position
+
+		while enabled do
+			local distanceToWaypoint = (root.Position - waypoint.Position).Magnitude
+			local distanceToFinal = (root.Position - finalPosition).Magnitude
+
+			if distanceToFinal <= STOP_DISTANCE then
+				return true
+			end
+
+			if distanceToWaypoint <= 3.5 then
+				return true
+			end
+
+			if os.clock() - startTime >= WAYPOINT_TIMEOUT then
+				forceJump()
+				return false
+			end
+
+			if os.clock() - startTime >= 0.55 and (root.Position - startPosition).Magnitude <= 0.75 then
+				forceJump()
+				return false
+			end
+
+			RunService.Heartbeat:Wait()
+		end
+
+		return false
 	end
 
 	local function followPathTo(position)
@@ -422,22 +494,30 @@ function Module.new(Context)
 				return
 			end
 
+			setActionText("Computing path...")
+
 			local path = makePath()
 			local blocked = false
 
 			local blockedConnection = path.Blocked:Connect(function()
 				blocked = true
+				forceJump()
 			end)
 
 			path:ComputeAsync(root.Position, position)
 
 			if path.Status ~= Enum.PathStatus.Success then
 				blockedConnection:Disconnect()
+				setActionText("Fallback moving...")
+				forceJump()
 				humanoid:MoveTo(position)
 				return
 			end
 
-			for _, waypoint in ipairs(path:GetWaypoints()) do
+			local waypoints = path:GetWaypoints()
+			setActionText("Following path...")
+
+			for index, waypoint in ipairs(waypoints) do
 				if not enabled or blocked then
 					break
 				end
@@ -446,13 +526,7 @@ function Module.new(Context)
 					break
 				end
 
-				if waypoint.Action == Enum.PathWaypointAction.Jump then
-					humanoid.Jump = true
-				end
-
-				humanoid:MoveTo(waypoint.Position)
-
-				local reached = humanoid.MoveToFinished:Wait()
+				local reached = moveToWaypoint(humanoid, root, waypoint, position)
 
 				if not reached then
 					break
@@ -460,7 +534,11 @@ function Module.new(Context)
 			end
 
 			if enabled and root and (root.Position - position).Magnitude <= WORK_DISTANCE then
+				setActionText("Working computer...")
 				stopCharacterStill()
+			else
+				setActionText("Repathing...")
+				forceJump()
 			end
 
 			blockedConnection:Disconnect()
@@ -487,6 +565,7 @@ function Module.new(Context)
 		end
 
 		if isStuck(root, deltaTime) then
+			forceJump()
 			return true
 		end
 
@@ -499,6 +578,7 @@ function Module.new(Context)
 		local computer = getNearestGoodComputer()
 
 		if not computer then
+			setActionText("No computer found")
 			stopTrigger()
 			cancelPath()
 			return
