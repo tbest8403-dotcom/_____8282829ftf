@@ -1,0 +1,92 @@
+--// modules/InfiniteWallHop.lua
+local InfiniteWallHop = {}
+InfiniteWallHop.__index = InfiniteWallHop
+
+local LocalPlayer
+local UserInputService
+local infiniteWallHopEnabled = false
+
+--// INFINITE WALL HOP LOGIC
+--// This only infinite jumps. No turning.
+
+local wallHopConnection = nil
+local lastWallHopJump = 0
+local wallHopJumpCooldown = 0.08
+
+local function doInfiniteWallHopJump()
+	if not infiniteWallHopEnabled then
+		return
+	end
+
+	local now = os.clock()
+	if now - lastWallHopJump < wallHopJumpCooldown then
+		return
+	end
+
+	lastWallHopJump = now
+
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+end
+
+local function enableInfiniteWallHop()
+	infiniteWallHopEnabled = true
+
+	if wallHopConnection then
+		wallHopConnection:Disconnect()
+		wallHopConnection = nil
+	end
+
+	wallHopConnection = UserInputService.JumpRequest:Connect(function()
+		doInfiniteWallHopJump()
+	end)
+end
+
+local function disableInfiniteWallHop()
+	infiniteWallHopEnabled = false
+
+	if wallHopConnection then
+		wallHopConnection:Disconnect()
+		wallHopConnection = nil
+	end
+end
+
+function InfiniteWallHop.new(ctx)
+	local self = setmetatable({}, InfiniteWallHop)
+	LocalPlayer = ctx.LocalPlayer
+	UserInputService = ctx.UserInputService
+	infiniteWallHopEnabled = false
+	lastWallHopJump = 0
+	return self
+end
+
+function InfiniteWallHop:SetEnabled(enabled)
+	if enabled then
+		enableInfiniteWallHop()
+	else
+		disableInfiniteWallHop()
+	end
+end
+
+function InfiniteWallHop:Enable()
+	enableInfiniteWallHop()
+end
+
+function InfiniteWallHop:Disable()
+	disableInfiniteWallHop()
+end
+
+function InfiniteWallHop:ResetCooldown()
+	lastWallHopJump = 0
+end
+
+return InfiniteWallHop
