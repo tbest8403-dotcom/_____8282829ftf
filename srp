@@ -1,29 +1,40 @@
 local BASE_URL = "https://raw.githubusercontent.com/tbest8403-dotcom/_____8282829ftf/main/"
 
 local function loadModule(fileName)
-	local url = BASE_URL .. fileName
-	local source = game:HttpGet(url)
-
-	local loadedFunction, loadError = loadstring(source)
-	if not loadedFunction then
-		error("Failed to load " .. fileName .. ": " .. tostring(loadError))
-	end
-
-	return loadedFunction()
+	return loadstring(game:HttpGet(BASE_URL .. fileName))()
 end
-
-local modules = {
-	PlayerHighlights = loadModule("playerhightlights"),
-	ComputerHighlight = loadModule("ComputerHighlight"),
-	InfiniteWallHop = loadModule("Infinitewallhop"),
-	GhostMode = loadModule("ghost")
-}
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+local highlightFolder = PlayerGui:FindFirstChild("DebugHighlights")
+if not highlightFolder then
+	highlightFolder = Instance.new("Folder")
+	highlightFolder.Name = "DebugHighlights"
+	highlightFolder.Parent = PlayerGui
+end
+
+local Context = {
+	Players = Players,
+	RunService = RunService,
+	Workspace = Workspace,
+	UserInputService = UserInputService,
+
+	LocalPlayer = LocalPlayer,
+	PlayerGui = PlayerGui,
+	HighlightFolder = highlightFolder
+}
+
+local PlayerHighlights = loadModule("playerhightlights")
+local ComputerHighlight = loadModule("ComputerHighlight")
+local InfiniteWallHop = loadModule("Infinitewallhop")
+local GhostMode = loadModule("ghost")
+local SafeDistance = loadModule("SafeDistance")
 
 local NightUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/asutse0/NightUILibrary/refs/heads/main/Project"))()
 
@@ -37,17 +48,11 @@ local Window = NightUI:CreateWindow({
 local Visuals = Window:CreateTab("Visuals")
 local Movement = Window:CreateTab("Movement")
 
-local highlightFolder = PlayerGui:FindFirstChild("DebugHighlights")
-if not highlightFolder then
-	highlightFolder = Instance.new("Folder")
-	highlightFolder.Name = "DebugHighlights"
-	highlightFolder.Parent = PlayerGui
-end
-
-local playerHighlights = modules.PlayerHighlights.new(highlightFolder)
-local computerHighlights = modules.ComputerHighlight.new(highlightFolder)
-local infiniteWallHop = modules.InfiniteWallHop.new()
-local ghostMode = modules.GhostMode.new()
+local playerHighlights = PlayerHighlights.new(Context)
+local computerHighlights = ComputerHighlight.new(Context)
+local infiniteWallHop = InfiniteWallHop.new(Context)
+local ghostMode = GhostMode.new(Context)
+local safeDistance = SafeDistance.new(Context)
 
 Visuals:CreateToggle({
 	Name = "Highlight Survivors",
@@ -69,11 +74,7 @@ Visuals:CreateToggle({
 	Name = "Highlight Computers",
 	Default = false,
 	Callback = function(enabled)
-		if enabled then
-			computerHighlights:Enable()
-		else
-			computerHighlights:Disable()
-		end
+		computerHighlights:SetEnabled(enabled)
 	end
 })
 
@@ -81,11 +82,7 @@ Movement:CreateToggle({
 	Name = "Infinite Wall Hop",
 	Default = false,
 	Callback = function(enabled)
-		if enabled then
-			infiniteWallHop:Enable()
-		else
-			infiniteWallHop:Disable()
-		end
+		infiniteWallHop:SetEnabled(enabled)
 	end
 })
 
@@ -93,24 +90,26 @@ Movement:CreateToggle({
 	Name = "Ghost Mode",
 	Default = false,
 	Callback = function(enabled)
-		if enabled then
-			ghostMode:Enable()
-		else
-			ghostMode:Disable()
-		end
+		ghostMode:SetEnabled(enabled)
+	end
+})
+
+Movement:CreateToggle({
+	Name = "Safe Distance Auto Computer",
+	Default = false,
+	Callback = function(enabled)
+		safeDistance:SetEnabled(enabled)
 	end
 })
 
 playerHighlights:Start()
 
 LocalPlayer.CharacterAdded:Connect(function()
-	infiniteWallHop:Reset()
-
-	if ghostMode:IsEnabled() then
-		ghostMode:Disable()
-	end
+	infiniteWallHop:ResetCooldown()
+	ghostMode:Disable()
+	safeDistance:Disable()
 end)
 
 RunService.RenderStepped:Connect(function()
-	playerHighlights:Refresh()
+	playerHighlights:Step()
 end)
