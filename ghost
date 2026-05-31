@@ -1,0 +1,599 @@
+--// modules/GhostMode.lua
+local GhostMode = {}
+GhostMode.__index = GhostMode
+
+local LocalPlayer
+local PlayerGui
+local RunService
+local Workspace
+local UserInputService
+local ghostModeEnabled = false
+
+--// GHOST MODE LOGIC
+--// Real character is repeatedly teleported 50 studs below. No anchoring.
+
+local ghostClone = nil
+local ghostConnection = nil
+local ghostNoclipConnection = nil
+local ghostRealKeepConnection = nil
+local ghostRealCharacter = nil
+local ghostRealRoot = nil
+local ghostRealHumanoid = nil
+local ghostOriginalCameraSubject = nil
+local ghostOriginalCFrame = nil
+local ghostSafeCFrame = nil
+local ghostFlySpeed = 42
+
+local ghostMobileGui = nil
+local ghostMobileUpHeld = false
+local ghostMobileDownHeld = false
+
+local ghostSavedPartStates = {}
+local ghostSavedHumanoidState = nil
+
+local controls = nil
+
+pcall(function()
+	local playerScripts = LocalPlayer:WaitForChild("PlayerScripts")
+	local playerModule = require(playerScripts:WaitForChild("PlayerModule"))
+	controls = playerModule:GetControls()
+end)
+
+local function getCharacterParts(character)
+	if not character then
+		return nil, nil
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+
+	return humanoid, rootPart
+end
+
+local function saveRealCharacterState(character, humanoid)
+	ghostSavedPartStates = {}
+	ghostSavedHumanoidState = nil
+
+	if character then
+		for _, descendant in ipairs(character:GetDescendants()) do
+			if descendant:IsA("BasePart") then
+				ghostSavedPartStates[descendant] = {
+					CanCollide = descendant.CanCollide,
+					CanTouch = descendant.CanTouch,
+					CanQuery = descendant.CanQuery,
+					Anchored = descendant.Anchored,
+					Massless = descendant.Massless,
+					Transparency = descendant.Transparency
+				}
+			end
+		end
+	end
+
+	if humanoid then
+		ghostSavedHumanoidState = {
+			PlatformStand = humanoid.PlatformStand,
+			AutoRotate = humanoid.AutoRotate,
+			WalkSpeed = humanoid.WalkSpeed,
+			JumpPower = humanoid.JumpPower,
+			JumpHeight = humanoid.JumpHeight,
+			UseJumpPower = humanoid.UseJumpPower,
+			Sit = humanoid.Sit
+		}
+	end
+end
+
+local function restoreRealCharacterState()
+	for part, state in pairs(ghostSavedPartStates) do
+		if part and part.Parent then
+			part.CanCollide = state.CanCollide
+			part.CanTouch = state.CanTouch
+			part.CanQuery = state.CanQuery
+			part.Anchored = state.Anchored
+			part.Massless = state.Massless
+			part.Transparency = state.Transparency
+			part.AssemblyLinearVelocity = Vector3.zero
+			part.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+
+	if ghostRealHumanoid and ghostRealHumanoid.Parent and ghostSavedHumanoidState then
+		ghostRealHumanoid.PlatformStand = ghostSavedHumanoidState.PlatformStand
+		ghostRealHumanoid.AutoRotate = ghostSavedHumanoidState.AutoRotate
+		ghostRealHumanoid.WalkSpeed = ghostSavedHumanoidState.WalkSpeed
+		ghostRealHumanoid.JumpPower = ghostSavedHumanoidState.JumpPower
+		ghostRealHumanoid.JumpHeight = ghostSavedHumanoidState.JumpHeight
+		ghostRealHumanoid.UseJumpPower = ghostSavedHumanoidState.UseJumpPower
+		ghostRealHumanoid.Sit = ghostSavedHumanoidState.Sit
+	end
+end
+
+local function setArchivableRecursive(instance, value)
+	if not instance then
+		return
+	end
+
+	pcall(function()
+		instance.Archivable = value
+	end)
+
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		pcall(function()
+			descendant.Archivable = value
+		end)
+	end
+end
+
+local function setRealCharacterSafeState(character)
+	if not character then
+		return
+	end
+
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+			descendant.Anchored = false
+			descendant.AssemblyLinearVelocity = Vector3.zero
+			descendant.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+end
+
+local function prepareGhostCharacter(character)
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+			descendant.Massless = true
+			descendant.AssemblyLinearVelocity = Vector3.zero
+			descendant.AssemblyAngularVelocity = Vector3.zero
+
+			if descendant.Name == "HumanoidRootPart" then
+				descendant.Transparency = 1
+			else
+				descendant.Transparency = math.clamp(descendant.Transparency + 0.35, 0, 0.85)
+			end
+		elseif descendant:IsA("Decal") then
+			descendant.Transparency = math.clamp(descendant.Transparency + 0.35, 0, 0.85)
+		elseif descendant:IsA("Script") or descendant:IsA("LocalScript") then
+			descendant:Destroy()
+		end
+	end
+end
+
+local function setGhostNoclip(character)
+	if not character then
+		return
+	end
+
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+			descendant.AssemblyLinearVelocity = Vector3.zero
+			descendant.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+end
+
+local function getBelowSafeCFrame(originCFrame)
+	return originCFrame * CFrame.new(0, -50, 0)
+end
+
+local function keepRealCharacterBelow()
+	if not ghostRealCharacter or not ghostRealRoot or not ghostRealRoot.Parent then
+		return
+	end
+
+	setRealCharacterSafeState(ghostRealCharacter)
+
+	ghostRealRoot.CFrame = ghostSafeCFrame
+	ghostRealRoot.AssemblyLinearVelocity = Vector3.zero
+	ghostRealRoot.AssemblyAngularVelocity = Vector3.zero
+
+	if ghostRealHumanoid and ghostRealHumanoid.Parent then
+		ghostRealHumanoid.PlatformStand = true
+		ghostRealHumanoid.AutoRotate = false
+		ghostRealHumanoid.Sit = false
+	end
+end
+
+local function moveRealCharacterToSafeSpot()
+	if not ghostRealRoot then
+		return
+	end
+
+	ghostSafeCFrame = getBelowSafeCFrame(ghostOriginalCFrame)
+	keepRealCharacterBelow()
+end
+
+local function getControlMoveVector()
+	if controls then
+		local success, moveVector = pcall(function()
+			return controls:GetMoveVector()
+		end)
+
+		if success and typeof(moveVector) == "Vector3" then
+			return moveVector
+		end
+	end
+
+	return Vector3.zero
+end
+
+local function createGhostMobileButtons()
+	if ghostMobileGui then
+		ghostMobileGui:Destroy()
+		ghostMobileGui = nil
+	end
+
+	ghostMobileUpHeld = false
+	ghostMobileDownHeld = false
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "GhostModeMobileControls"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gui.Parent = PlayerGui
+
+	local function makeButton(name, text, position)
+		local button = Instance.new("TextButton")
+		button.Name = name
+		button.Size = UDim2.fromOffset(72, 72)
+		button.Position = position
+		button.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
+		button.BackgroundTransparency = 0.15
+		button.Text = text
+		button.TextColor3 = Color3.fromRGB(245, 245, 255)
+		button.TextSize = 16
+		button.Font = Enum.Font.GothamBold
+		button.AutoButtonColor = false
+		button.ZIndex = 200
+		button.Parent = gui
+
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 999)
+		corner.Parent = button
+
+		return button
+	end
+
+	local upButton = makeButton("UpButton", "UP", UDim2.new(1, -92, 0.55, -80))
+	local downButton = makeButton("DownButton", "DOWN", UDim2.new(1, -92, 0.55, 0))
+
+	local function bindHold(button, setState)
+		button.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch
+				or input.UserInputType == Enum.UserInputType.MouseButton1 then
+				setState(true)
+			end
+		end)
+
+		button.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch
+				or input.UserInputType == Enum.UserInputType.MouseButton1 then
+				setState(false)
+			end
+		end)
+
+		button.MouseLeave:Connect(function()
+			setState(false)
+		end)
+	end
+
+	bindHold(upButton, function(value)
+		ghostMobileUpHeld = value
+	end)
+
+	bindHold(downButton, function(value)
+		ghostMobileDownHeld = value
+	end)
+
+	ghostMobileGui = gui
+end
+
+local function destroyGhostMobileButtons()
+	ghostMobileUpHeld = false
+	ghostMobileDownHeld = false
+
+	if ghostMobileGui then
+		ghostMobileGui:Destroy()
+		ghostMobileGui = nil
+	end
+end
+
+local function getGhostMoveVector()
+	local rawMove = getControlMoveVector()
+
+	local camera = Workspace.CurrentCamera
+	local moveVector = Vector3.zero
+
+	if camera then
+		local cameraCF = camera.CFrame
+		local forward = Vector3.new(cameraCF.LookVector.X, 0, cameraCF.LookVector.Z)
+		local right = Vector3.new(cameraCF.RightVector.X, 0, cameraCF.RightVector.Z)
+
+		if forward.Magnitude > 0 then
+			forward = forward.Unit
+		end
+
+		if right.Magnitude > 0 then
+			right = right.Unit
+		end
+
+		moveVector = (right * rawMove.X) + (forward * -rawMove.Z)
+	else
+		moveVector = Vector3.new(rawMove.X, 0, rawMove.Z)
+	end
+
+	local vertical = 0
+
+	if UserInputService:IsKeyDown(Enum.KeyCode.Space) or ghostMobileUpHeld then
+		vertical += 1
+	end
+
+	if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
+		or UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+		or ghostMobileDownHeld then
+		vertical -= 1
+	end
+
+	moveVector = Vector3.new(moveVector.X, vertical, moveVector.Z)
+
+	if moveVector.Magnitude > 1 then
+		moveVector = moveVector.Unit
+	end
+
+	return moveVector
+end
+
+local function restoreRealCharacterToGhostPosition()
+	local targetCFrame = ghostOriginalCFrame
+
+	if ghostClone then
+		local _, ghostRoot = getCharacterParts(ghostClone)
+
+		if ghostRoot then
+			targetCFrame = ghostRoot.CFrame
+		end
+	end
+
+	if ghostRealRoot and ghostRealRoot.Parent then
+		ghostRealRoot.CFrame = targetCFrame
+		ghostRealRoot.AssemblyLinearVelocity = Vector3.zero
+		ghostRealRoot.AssemblyAngularVelocity = Vector3.zero
+	end
+
+	restoreRealCharacterState()
+
+	if ghostRealHumanoid and ghostRealHumanoid.Parent then
+		ghostRealHumanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+
+		task.defer(function()
+			if ghostRealHumanoid and ghostRealHumanoid.Parent then
+				ghostRealHumanoid:ChangeState(Enum.HumanoidStateType.Running)
+			end
+		end)
+	end
+
+	if Workspace.CurrentCamera and ghostRealHumanoid then
+		Workspace.CurrentCamera.CameraSubject = ghostRealHumanoid
+	end
+end
+
+local function enableGhostMode()
+	if ghostModeEnabled then
+		return
+	end
+
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+
+	local realHumanoid, realRoot = getCharacterParts(character)
+	if not realHumanoid or not realRoot then
+		return
+	end
+
+	ghostModeEnabled = true
+
+	ghostRealCharacter = character
+	ghostRealHumanoid = realHumanoid
+	ghostRealRoot = realRoot
+	ghostOriginalCFrame = realRoot.CFrame
+	ghostOriginalCameraSubject = Workspace.CurrentCamera and Workspace.CurrentCamera.CameraSubject or nil
+
+	saveRealCharacterState(character, realHumanoid)
+	setArchivableRecursive(character, true)
+
+	local clone = character:Clone()
+	if not clone then
+		ghostModeEnabled = false
+		restoreRealCharacterState()
+		return
+	end
+
+	clone.Name = LocalPlayer.Name .. "_GhostModeClone"
+	clone.Parent = Workspace
+	ghostClone = clone
+
+	local ghostHumanoid, ghostRoot = getCharacterParts(clone)
+
+	if not ghostHumanoid or not ghostRoot then
+		ghostModeEnabled = false
+		restoreRealCharacterState()
+
+		if ghostClone then
+			ghostClone:Destroy()
+			ghostClone = nil
+		end
+
+		return
+	end
+
+	prepareGhostCharacter(clone)
+
+	ghostRoot.CFrame = ghostOriginalCFrame
+	ghostRoot.Anchored = true
+	ghostRoot.AssemblyLinearVelocity = Vector3.zero
+	ghostRoot.AssemblyAngularVelocity = Vector3.zero
+
+	ghostHumanoid.AutoRotate = false
+	ghostHumanoid.PlatformStand = true
+	ghostHumanoid.WalkSpeed = 0
+	ghostHumanoid.JumpPower = 0
+
+	moveRealCharacterToSafeSpot()
+	createGhostMobileButtons()
+
+	if Workspace.CurrentCamera then
+		Workspace.CurrentCamera.CameraSubject = ghostHumanoid
+	end
+
+	if ghostNoclipConnection then
+		ghostNoclipConnection:Disconnect()
+		ghostNoclipConnection = nil
+	end
+
+	ghostNoclipConnection = RunService.Stepped:Connect(function()
+		if ghostClone then
+			setGhostNoclip(ghostClone)
+		end
+	end)
+
+	if ghostRealKeepConnection then
+		ghostRealKeepConnection:Disconnect()
+		ghostRealKeepConnection = nil
+	end
+
+	ghostRealKeepConnection = RunService.Heartbeat:Connect(function()
+		if ghostModeEnabled then
+			keepRealCharacterBelow()
+		end
+	end)
+
+	if ghostConnection then
+		ghostConnection:Disconnect()
+		ghostConnection = nil
+	end
+
+	ghostConnection = RunService.RenderStepped:Connect(function(deltaTime)
+		if not ghostModeEnabled then
+			return
+		end
+
+		if not ghostClone or not ghostClone.Parent then
+			return
+		end
+
+		local _, currentGhostRoot = getCharacterParts(ghostClone)
+		if not currentGhostRoot then
+			return
+		end
+
+		currentGhostRoot.Anchored = true
+
+		local moveVector = getGhostMoveVector()
+
+		if moveVector.Magnitude > 0 then
+			local newPosition = currentGhostRoot.Position + (moveVector * ghostFlySpeed * deltaTime)
+
+			local camera = Workspace.CurrentCamera
+			local lookDirection = currentGhostRoot.CFrame.LookVector
+
+			if camera then
+				local cameraLook = camera.CFrame.LookVector
+				local flatLook = Vector3.new(cameraLook.X, 0, cameraLook.Z)
+
+				if flatLook.Magnitude > 0 then
+					lookDirection = flatLook.Unit
+				end
+			end
+
+			currentGhostRoot.CFrame = CFrame.new(newPosition, newPosition + lookDirection)
+		end
+
+		currentGhostRoot.AssemblyLinearVelocity = Vector3.zero
+		currentGhostRoot.AssemblyAngularVelocity = Vector3.zero
+	end)
+end
+
+local function disableGhostMode()
+	if not ghostModeEnabled then
+		return
+	end
+
+	ghostModeEnabled = false
+
+	if ghostConnection then
+		ghostConnection:Disconnect()
+		ghostConnection = nil
+	end
+
+	if ghostNoclipConnection then
+		ghostNoclipConnection:Disconnect()
+		ghostNoclipConnection = nil
+	end
+
+	if ghostRealKeepConnection then
+		ghostRealKeepConnection:Disconnect()
+		ghostRealKeepConnection = nil
+	end
+
+	destroyGhostMobileButtons()
+	restoreRealCharacterToGhostPosition()
+
+	if ghostClone then
+		ghostClone:Destroy()
+		ghostClone = nil
+	end
+
+	if Workspace.CurrentCamera and ghostOriginalCameraSubject and ghostOriginalCameraSubject.Parent then
+		Workspace.CurrentCamera.CameraSubject = ghostOriginalCameraSubject
+	elseif Workspace.CurrentCamera and ghostRealHumanoid then
+		Workspace.CurrentCamera.CameraSubject = ghostRealHumanoid
+	end
+
+	ghostRealCharacter = nil
+	ghostRealRoot = nil
+	ghostRealHumanoid = nil
+	ghostOriginalCameraSubject = nil
+	ghostOriginalCFrame = nil
+	ghostSafeCFrame = nil
+	ghostSavedPartStates = {}
+	ghostSavedHumanoidState = nil
+end
+
+function GhostMode.new(ctx)
+	local self = setmetatable({}, GhostMode)
+	LocalPlayer = ctx.LocalPlayer
+	PlayerGui = ctx.PlayerGui
+	RunService = ctx.RunService
+	Workspace = ctx.Workspace
+	UserInputService = ctx.UserInputService
+	ghostModeEnabled = false
+	return self
+end
+
+function GhostMode:SetEnabled(enabled)
+	if enabled then
+		enableGhostMode()
+	else
+		disableGhostMode()
+	end
+end
+
+function GhostMode:Enable()
+	enableGhostMode()
+end
+
+function GhostMode:Disable()
+	disableGhostMode()
+end
+
+return GhostMode
