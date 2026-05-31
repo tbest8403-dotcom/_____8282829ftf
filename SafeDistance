@@ -1,0 +1,451 @@
+local Module = {}
+
+function Module.new(Context)
+	local self = {}
+
+	local Players = Context.Players
+	local RunService = Context.RunService
+	local Workspace = Context.Workspace
+	local LocalPlayer = Context.LocalPlayer
+	local PlayerGui = Context.PlayerGui
+
+	local PathfindingService = game:GetService("PathfindingService")
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local RemoteEvent = ReplicatedStorage:WaitForChild("RemoteEvent")
+
+	local enabled = false
+	local gui = nil
+	local loopConnection = nil
+	local currentEvent = nil
+	local pathThread = nil
+
+	local lastTargetComputer = nil
+	local lastTrigger = 0
+	local lastPathRefresh = 0
+	local lastKnownPosition = nil
+	local stuckTimer = 0
+
+	local SAFE_DISTANCE = 120
+	local DANGER_DISTANCE = 65
+	local PATH_REFRESH = 1.15
+	local TRIGGER_REFRESH = 0.35
+	local STUCK_DISTANCE = 1.5
+	local STUCK_TIME = 1.25
+	local COMPUTER_STOP_OFFSET = Vector3.new(0, 0, -3)
+
+	local function getCharacterData(player)
+		local character = player.Character
+		if not character then
+			return nil, nil, nil
+		end
+
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		local root = character:FindFirstChild("HumanoidRootPart")
+
+		return character, humanoid, root
+	end
+
+	local function getLocalCharacterSize()
+		local character, humanoid, root = getCharacterData(LocalPlayer)
+
+		if not character or not humanoid or not root then
+			return 2.5, 5
+		end
+
+		local size = character:GetExtentsSize()
+
+		local radius = math.max(size.X, size.Z) * 0.5
+		local height = size.Y
+
+		radius = math.clamp(radius, 1.5, 5)
+		height = math.clamp(height, 4, 12)
+
+		return radius, height
+	end
+
+	local function makePath()
+		local radius, height = getLocalCharacterSize()
+
+		return PathfindingService:CreatePath({
+			AgentRadius = radius,
+			AgentHeight = height,
+			AgentCanJump = true,
+			AgentCanClimb = true,
+			WaypointSpacing = math.clamp(radius * 2, 3, 7)
+		})
+	end
+
+	local function isBeast(player)
+		local character = player.Character
+		return character and character:FindFirstChild("Hammer") ~= nil
+	end
+
+	local function getBeast()
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player ~= LocalPlayer and isBeast(player) then
+				local _, _, root = getCharacterData(player)
+				if root then
+					return player, root
+				end
+			end
+		end
+
+		return nil, nil
+	end
+
+	local function getDistanceFromBeast()
+		local _, _, myRoot = getCharacterData(LocalPlayer)
+		local beastPlayer, beastRoot = getBeast()
+
+		if not myRoot or not beastRoot then
+			return math.huge, beastPlayer
+		end
+
+		return (myRoot.Position - beastRoot.Position).Magnitude, beastPlayer
+	end
+
+	local function getSafetyText(distance)
+		if distance == math.huge then
+			return "Beast: Not Found", "Safe"
+		end
+
+		if distance <= DANGER_DISTANCE then
+			return "Danger: " .. math.floor(distance) .. " studs", "Danger"
+		end
+
+		if distance <= SAFE_DISTANCE then
+			return "Careful: " .. math.floor(distance) .. " studs", "Careful"
+		end
+
+		return "Safe: " .. math.floor(distance) .. " studs", "Safe"
+	end
+
+	local function makeGui()
+		gui = Instance.new("ScreenGui")
+		gui.Name = "BeastSafetyGui"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = true
+		gui.Parent = PlayerGui
+
+		local frame = Instance.new("Frame")
+		frame.Name = "Frame"
+		frame.Size = UDim2.fromOffset(240, 62)
+		frame.Position = UDim2.new(1, -255, 0, 18)
+		frame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+		frame.BackgroundTransparency = 0.08
+		frame.BorderSizePixel = 0
+		frame.Parent = gui
+
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 10)
+		corner.Parent = frame
+
+		local title = Instance.new("TextLabel")
+		title.Name = "Title"
+		title.Size = UDim2.new(1, -16, 0, 22)
+		title.Position = UDim2.fromOffset(8, 5)
+		title.BackgroundTransparency = 1
+		title.Text = "Beast Distance"
+		title.TextColor3 = Color3.fromRGB(255, 255, 255)
+		title.TextSize = 14
+		title.Font = Enum.Font.GothamBold
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.Parent = frame
+
+		local status = Instance.new("TextLabel")
+		status.Name = "Status"
+		status.Size = UDim2.new(1, -16, 0, 26)
+		status.Position = UDim2.fromOffset(8, 29)
+		status.BackgroundTransparency = 1
+		status.Text = "Checking..."
+		status.TextColor3 = Color3.fromRGB(120, 255, 145)
+		status.TextSize = 16
+		status.Font = Enum.Font.GothamSemibold
+		status.TextXAlignment = Enum.TextXAlignment.Left
+		status.Parent = frame
+	end
+
+	local function updateGui()
+		local distance = getDistanceFromBeast()
+		local text, state = getSafetyText(distance)
+
+		local status = gui and gui:FindFirstChild("Frame") and gui.Frame:FindFirstChild("Status")
+		if not status then
+			return
+		end
+
+		status.Text = text
+
+		if state == "Danger" then
+			status.TextColor3 = Color3.fromRGB(255, 75, 75)
+		elseif state == "Careful" then
+			status.TextColor3 = Color3.fromRGB(255, 210, 80)
+		else
+			status.TextColor3 = Color3.fromRGB(120, 255, 145)
+		end
+	end
+
+	local function isComputerTable(model)
+		return model:IsA("Model") and model.Name == "ComputerTable"
+	end
+
+	local function getComputerTriggerEvent(computer)
+		local trigger = computer:FindFirstChild("ComputerTrigger2", true)
+		return trigger and trigger:FindFirstChild("Event")
+	end
+
+	local function getComputerPosition(computer)
+		local part = computer.PrimaryPart or computer:FindFirstChildWhichIsA("BasePart", true)
+		return part and part.Position
+	end
+
+	local function getTargetPosition(computer)
+		local pos = getComputerPosition(computer)
+		return pos and (pos + COMPUTER_STOP_OFFSET)
+	end
+
+	local function getNearestGoodComputer()
+		local _, _, myRoot = getCharacterData(LocalPlayer)
+		local _, beastRoot = getBeast()
+
+		if not myRoot then
+			return nil
+		end
+
+		local bestComputer = nil
+		local bestScore = math.huge
+
+		for _, obj in ipairs(Workspace:GetDescendants()) do
+			if isComputerTable(obj) then
+				local pos = getComputerPosition(obj)
+				local event = getComputerTriggerEvent(obj)
+
+				if pos and event then
+					local myDistance = (myRoot.Position - pos).Magnitude
+					local beastDistance = beastRoot and (beastRoot.Position - pos).Magnitude or SAFE_DISTANCE
+					local score = myDistance
+
+					if beastDistance < SAFE_DISTANCE then
+						score = score + ((SAFE_DISTANCE - beastDistance) * 4)
+					end
+
+					if beastDistance < DANGER_DISTANCE then
+						score = score + 999
+					end
+
+					if score < bestScore then
+						bestScore = score
+						bestComputer = obj
+					end
+				end
+			end
+		end
+
+		return bestComputer
+	end
+
+	local function fireTrigger(event, value)
+		if currentEvent and currentEvent ~= event then
+			RemoteEvent:FireServer("Input", "Trigger", false, currentEvent)
+		end
+
+		currentEvent = event
+		RemoteEvent:FireServer("Input", "Trigger", value, event)
+
+		if not value then
+			currentEvent = nil
+		end
+	end
+
+	local function stopTrigger()
+		if currentEvent then
+			RemoteEvent:FireServer("Input", "Trigger", false, currentEvent)
+			currentEvent = nil
+		end
+	end
+
+	local function cancelPath()
+		if pathThread then
+			task.cancel(pathThread)
+			pathThread = nil
+		end
+	end
+
+	local function isStuck(root, deltaTime)
+		if not lastKnownPosition then
+			lastKnownPosition = root.Position
+			stuckTimer = 0
+			return false
+		end
+
+		local moved = (root.Position - lastKnownPosition).Magnitude
+		lastKnownPosition = root.Position
+
+		if moved <= STUCK_DISTANCE then
+			stuckTimer = stuckTimer + deltaTime
+		else
+			stuckTimer = 0
+		end
+
+		return stuckTimer >= STUCK_TIME
+	end
+
+	local function followPathTo(position)
+		cancelPath()
+
+		pathThread = task.spawn(function()
+			local _, humanoid, root = getCharacterData(LocalPlayer)
+
+			if not humanoid or not root then
+				return
+			end
+
+			local path = makePath()
+			local blocked = false
+
+			local blockedConnection = path.Blocked:Connect(function()
+				blocked = true
+			end)
+
+			path:ComputeAsync(root.Position, position)
+
+			if path.Status ~= Enum.PathStatus.Success then
+				blockedConnection:Disconnect()
+				humanoid:MoveTo(position)
+				return
+			end
+
+			for _, waypoint in ipairs(path:GetWaypoints()) do
+				if not enabled or blocked then
+					break
+				end
+
+				if waypoint.Action == Enum.PathWaypointAction.Jump then
+					humanoid.Jump = true
+				end
+
+				humanoid:MoveTo(waypoint.Position)
+
+				local reached = humanoid.MoveToFinished:Wait()
+
+				if not reached then
+					break
+				end
+			end
+
+			blockedConnection:Disconnect()
+		end)
+	end
+
+	local function shouldRefreshPath(computer, deltaTime)
+		local _, _, root = getCharacterData(LocalPlayer)
+
+		if not root then
+			return false
+		end
+
+		if computer ~= lastTargetComputer then
+			return true
+		end
+
+		if isStuck(root, deltaTime) then
+			return true
+		end
+
+		return os.clock() - lastPathRefresh >= PATH_REFRESH
+	end
+
+	local function step(deltaTime)
+		updateGui()
+
+		local computer = getNearestGoodComputer()
+
+		if not computer then
+			stopTrigger()
+			cancelPath()
+			return
+		end
+
+		local targetPosition = getTargetPosition(computer)
+
+		if targetPosition and shouldRefreshPath(computer, deltaTime) then
+			lastTargetComputer = computer
+			lastPathRefresh = os.clock()
+			stuckTimer = 0
+			followPathTo(targetPosition)
+		end
+
+		if os.clock() - lastTrigger >= TRIGGER_REFRESH then
+			lastTrigger = os.clock()
+
+			local event = getComputerTriggerEvent(computer)
+			if event then
+				fireTrigger(event, true)
+			end
+		end
+	end
+
+	function self:Enable()
+		if enabled then
+			return
+		end
+
+		enabled = true
+		lastTargetComputer = nil
+		lastKnownPosition = nil
+		stuckTimer = 0
+		lastPathRefresh = 0
+		lastTrigger = 0
+
+		makeGui()
+
+		loopConnection = RunService.Heartbeat:Connect(function(deltaTime)
+			step(deltaTime)
+		end)
+	end
+
+	function self:Disable()
+		enabled = false
+		stopTrigger()
+		cancelPath()
+
+		if loopConnection then
+			loopConnection:Disconnect()
+			loopConnection = nil
+		end
+
+		if gui then
+			gui:Destroy()
+			gui = nil
+		end
+
+		lastTargetComputer = nil
+		lastKnownPosition = nil
+		stuckTimer = 0
+	end
+
+	function self:SetEnabled(value)
+		if value then
+			self:Enable()
+		else
+			self:Disable()
+		end
+	end
+
+	LocalPlayer.CharacterRemoving:Connect(function()
+		stopTrigger()
+		cancelPath()
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		if isBeast(player) then
+			stopTrigger()
+			cancelPath()
+			lastTargetComputer = nil
+		end
+	end)
+
+	return self
+end
+
+return Module
